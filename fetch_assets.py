@@ -18,6 +18,7 @@ Uso:
 import argparse
 import base64
 import datetime
+import hashlib
 import io
 import json
 import re
@@ -34,9 +35,11 @@ except ImportError:
 
 HERE = Path(__file__).parent
 PAGE = HERE / 'fixture_liga_bolivia.html'
+CRESTS_DIR = HERE / 'escudos'   # escudos/<slug>.png pisa lo que manda la API
 API_BASE = 'https://v3.football.api-sports.io'
 MEDIA_BASE = 'https://media.api-sports.io/football/teams'   # sin key, sin gastar cuota
-CREST_PX = 96
+CREST_PX = 96          # escudos que vienen de la API (nativos 150x150)
+LOCAL_CREST_PX = 144   # escudos de escudos/, curados a mano
 
 # La app es un HTML autocontenido: los assets viven en esta línea del <script>.
 ASSETS_RE = re.compile(r'^const ASSETS = \{.*\};?$', re.M)
@@ -184,25 +187,88 @@ def slugify(api_name):
 
 # ── escudos ──────────────────────────────────────────────────────────────────
 
-def fetch_crest(url):
-    """Descarga el escudo y lo devuelve como data URI reducido a CREST_PX."""
-    try:
-        with urllib.request.urlopen(url, timeout=30) as resp:
-            raw = resp.read()
-    except Exception as e:
-        print(f"    ⚠️  no pude bajar {url}: {e}")
-        return None
-
+def encode_crest(raw, px=CREST_PX):
+    """Reduce a px y devuelve el data URI."""
     if Image is not None:
         try:
             im = Image.open(io.BytesIO(raw)).convert('RGBA')
-            im.thumbnail((CREST_PX, CREST_PX), Image.LANCZOS)
+            im.thumbnail((px, px), Image.LANCZOS)
             buf = io.BytesIO()
             im.save(buf, 'PNG', optimize=True)
             raw = buf.getvalue()
         except Exception as e:
             print(f"    ⚠️  no pude optimizar el escudo ({e}), lo embebo tal cual")
     return 'data:image/png;base64,' + base64.b64encode(raw).decode()
+
+
+def apply_local_crests(teams, api_md5, forzar=False):
+    """Usa los escudos de escudos/<slug>.png, pero solo cuando hacen falta.
+
+    API-Football tiene escudos equivocados: sirve el de Independiente Petrolero
+    para Oriente Petrolero — los archivos de 3707 y 15702 son idénticos. El
+    criterio para meter el escudo local es justamente esa duplicación: si el
+    archivo que manda la API para ese club es byte por byte igual al de otro
+    club, sigue roto. Si es único, damos por hecho que lo corrigieron y usamos
+    el de la API, así el proyecto se beneficia de la corrección sin tocar nada.
+
+    api_md5: {slug: md5 del PNG crudo que devolvió la API en esta corrida}
+    forzar:  aplica los locales sin evaluar la condición
+    """
+    if not CRESTS_DIR.is_dir():
+        return
+
+    # Qué md5 de la API aparece en más de un club: esos son los datos malos.
+    repetidos = {h for h in api_md5.values() if list(api_md5.values()).count(h) > 1}
+
+    aplicados, descartados = [], []
+    for png in sorted(CRESTS_DIR.glob('*.png')):
+        slug = png.stem
+        if slug not in teams:
+            print(f"    ⚠️  {png.name}: no hay ningún club con el slug '{slug}', lo ignoro")
+            continue
+
+        mio = api_md5.get(slug)
+        if forzar:
+            motivo = 'forzado con --forzar-escudos'
+        elif mio is None:
+            motivo = 'la API no dio escudo para este club'
+        elif mio in repetidos:
+            gemelos = [teams[s]['name'] for s, h in api_md5.items() if h == mio and s != slug]
+            motivo = f"la API sigue mandando el mismo archivo que {', '.join(gemelos)}"
+        else:
+            descartados.append(slug)
+            continue
+
+        # Más resolución que los de la API: son pocos, curados a mano, y algunos
+        # traen detalle fino (estrellas, texto) que a 96 px se pierde.
+        teams[slug]['crest'] = encode_crest(png.read_bytes(), px=LOCAL_CREST_PX)
+        aplicados.append((teams[slug]['name'], png.name, motivo))
+
+    if aplicados:
+        print("\n→ Escudos locales aplicados …")
+        for name, archivo, motivo in aplicados:
+            print(f"    ✓ {name} ({archivo}) — {motivo}")
+
+    if descartados:
+        print("\n→ Escudos locales NO aplicados: la API ya manda uno propio 🎉")
+        for slug in descartados:
+            print(f"    • {teams[slug]['name']}: ahora se usa el de la API. "
+                  f"Revisá que sea el correcto; si no, corré con --forzar-escudos.")
+
+
+def fetch_crest(url):
+    """Descarga el escudo. Devuelve (data_uri, md5_del_png_crudo) o (None, None).
+
+    El md5 es del archivo tal como lo manda la API, antes de reducirlo: sirve
+    para detectar que dos clubes reciben exactamente la misma imagen.
+    """
+    try:
+        with urllib.request.urlopen(url, timeout=30) as resp:
+            raw = resp.read()
+    except Exception as e:
+        print(f"    ⚠️  no pude bajar {url}: {e}")
+        return None, None
+    return encode_crest(raw), hashlib.md5(raw).hexdigest()
 
 
 # ── escritura ────────────────────────────────────────────────────────────────
@@ -244,6 +310,8 @@ def main():
     ap.add_argument('--season', type=int, help='Temporada (default: año actual)')
     ap.add_argument('--league', type=int, help='Forzar un league.id en vez de autodetectarlo')
     ap.add_argument('--list', action='store_true', help='Solo listar las ligas de Bolivia')
+    ap.add_argument('--forzar-escudos', action='store_true',
+                    help='Aplica los escudos de escudos/ sin evaluar si la API ya los corrigió')
     args = ap.parse_args()
 
     key = read_key()
@@ -316,6 +384,7 @@ def main():
         teams.setdefault(slug, {}).update({k: v for k, v in data.items() if v is not None})
     aliases = {**SEED_ALIASES, **(assets.get('aliases') or {})}
     seen = set()
+    api_md5 = {}   # slug -> md5 del PNG crudo, para detectar imágenes repetidas
 
     print(f"\n→ Descargando {len(api_teams)} escudos …")
     for item in api_teams:
@@ -328,7 +397,10 @@ def main():
         seen.add(slug)
         teams[slug]['apiId'] = t['id']
         if t.get('logo'):
-            teams[slug]['crest'] = fetch_crest(t['logo'])
+            uri, md5 = fetch_crest(t['logo'])
+            if uri:
+                teams[slug]['crest'] = uri
+                api_md5[slug] = md5
         aliases[normalize(t['name'])] = slug
         print(f"    ✓ {t['name']:<28} id={t['id']}")
 
@@ -339,14 +411,29 @@ def main():
     if pendientes:
         print(f"\n→ Escudos por id (fuera del roster) …")
         for slug in pendientes:
-            crest = fetch_crest(f"{MEDIA_BASE}/{teams[slug]['apiId']}.png")
-            if crest:
-                teams[slug]['crest'] = crest
+            uri, md5 = fetch_crest(f"{MEDIA_BASE}/{teams[slug]['apiId']}.png")
+            if uri:
+                teams[slug]['crest'] = uri
+                api_md5[slug] = md5
                 print(f"    ✓ {teams[slug]['name']:<28} id={teams[slug]['apiId']}")
+
+    # Los escudos locales entran solo si la API sigue mandando uno repetido.
+    apply_local_crests(teams, api_md5, forzar=args.forzar_escudos)
 
     faltantes = [s for s in teams if not teams[s].get('crest')]
     if faltantes:
         print(f"\n  ℹ️  Siguen sin escudo (se dibuja el monograma): {', '.join(faltantes)}")
+
+    # Dos clubes con el mismo escudo suele ser un dato malo de la API.
+    vistos = {}
+    for slug, t in teams.items():
+        if t.get('crest'):
+            vistos.setdefault(t['crest'], []).append(teams[slug]['name'])
+    repetidos = [v for v in vistos.values() if len(v) > 1]
+    if repetidos:
+        print("\n  ⚠️  Escudos repetidos entre clubes (revisá la carpeta escudos/):")
+        for grupo in repetidos:
+            print(f"      {' = '.join(grupo)}")
 
     write_page(
         assets,

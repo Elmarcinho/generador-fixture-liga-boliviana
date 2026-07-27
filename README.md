@@ -100,4 +100,38 @@ Hay dos caminos:
 Para encontrar el id de un club: `/teams?country=Bolivia` lista los 114 equipos
 bolivianos que conoce la API (1 request).
 
+### Escudos equivocados en la API: la carpeta `escudos/`
+
+API-Football tiene errores en algunos escudos. El caso confirmado:
+`media.api-sports.io/football/teams/3707.png` (Oriente Petrolero) y
+`.../15702.png` (Independiente Petrolero) devuelven **el mismo archivo**, byte
+por byte. La metadata apunta bien, pero la imagen de Oriente es la de
+Independiente.
+
+Para eso existe `escudos/`. Poné ahí `escudos/<slug>.png` y corré el script:
+
+```bash
+cp mi_escudo.png "escudos/orientepetrolero.png"
+python3 fetch_assets.py
+```
+
+**El escudo local no se aplica siempre: solo cuando hace falta.** El criterio es
+la duplicación misma. Si el archivo que la API manda para ese club es byte por
+byte igual al de otro club, sigue roto y entra el local. Si es único, se asume
+que lo corrigieron y se usa el de la API — así el proyecto se beneficia de la
+corrección sin que haya que tocar nada, y el script te avisa que el archivo local
+quedó sin usar.
+
+| Situación | Qué usa |
+|---|---|
+| La API manda el mismo archivo que otro club | el local |
+| La API manda un archivo propio y único | **el de la API** (avisa) |
+| La API no manda escudo para ese club | el local |
+| `python3 fetch_assets.py --forzar-escudos` | el local, siempre |
+
+`--forzar-escudos` es la salida para el caso en que la API mande un escudo único
+pero igualmente equivocado, que la detección por duplicado no puede ver.
+
+Los escudos locales se embeben a 144 px en vez de los 96 px de la API, porque
+suelen traer detalle fino (estrellas, texto) que a 96 px se pierde.
 
