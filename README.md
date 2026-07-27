@@ -100,8 +100,4 @@ Hay dos caminos:
 Para encontrar el id de un club: `/teams?country=Bolivia` lista los 114 equipos
 bolivianos que conoce la API (1 request).
 
-## Transmisión y marcas
 
-Canal fijo: **Entel Gol**.
-
-Fila del pie, en orden: **Veltix · Nubia · MasTV · número de WhatsApp**.
